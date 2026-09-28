@@ -173,6 +173,13 @@ public class YtDownload {
         /** Último erro 429 (para backoff global se repetir). */
         private static long ultimo429Ms = 0L;
 
+        /**
+         * Modo rápido por thread (v1.193): desativa o espaçamento entre requests
+         * em caminhos sensíveis a latência (prévia, pesquisa, preflight, download).
+         * A proteção que resta: fingerprint + cookies + retry com backoff.
+         */
+        static final ThreadLocal<Boolean> semEspera = ThreadLocal.withInitial(() -> false);
+
         @Override
         public Response execute(Request request) throws IOException, ReCaptchaException {
             IOException ultimaFalha = null;
@@ -254,6 +261,7 @@ public class YtDownload {
          * resfriamento — o YouTube pune re-tentativas imediatas.
          */
         private static synchronized void esperarVez() {
+            if (Boolean.TRUE.equals(semEspera.get())) return; // rápido: latência > proteção
             long agora = System.currentTimeMillis();
             long intervalo = INTERVALO_MIN_MS;
             if (ultimo429Ms > 0 && agora - ultimo429Ms < 60_000L) intervalo *= 3;
@@ -320,6 +328,12 @@ public class YtDownload {
 
     /** Verifica o tamanho do áudio antes de iniciar o download. */
     public synchronized String preflight(String url) {
+        NexusDownloader.semEspera.set(true);
+        try { return preflightInterno(url); }
+        finally { NexusDownloader.semEspera.remove(); }
+    }
+
+    private synchronized String preflightInterno(String url) {
         if (url == null || url.trim().isEmpty()) {
             return "{\"ok\":false,\"erro\":\"Resultado inválido\"}";
         }
@@ -341,7 +355,14 @@ public class YtDownload {
     }
 
 
+    /** v1.193: prévia sem espera entre requests. */
     public String previa(String url) {
+        NexusDownloader.semEspera.set(true);
+        try { return previaInterno(url); }
+        finally { NexusDownloader.semEspera.remove(); }
+    }
+
+    private String previaInterno(String url) {
         if (url == null || url.trim().isEmpty()) {
             return "{\"ok\":false,\"erro\":\"Resultado inválido\"}";
         }
@@ -462,7 +483,14 @@ public class YtDownload {
     }
 
 
+    /** v1.193: pesquisa sem espera entre requests. */
     public String pesquisar(String termo) {
+        NexusDownloader.semEspera.set(true);
+        try { return pesquisarInterno(termo); }
+        finally { NexusDownloader.semEspera.remove(); }
+    }
+
+    private String pesquisarInterno(String termo) {
         if (termo == null || termo.trim().isEmpty()) {
             return "{\"ok\":false,\"erro\":\"Digite o nome da música\",\"resultados\":[]}";
         }
@@ -601,7 +629,14 @@ public class YtDownload {
     //  O trabalho
     // ------------------------------------------------------------------ //
 
+    /** v1.193: download sem espera entre requests (só a extração passa pelo NewPipe). */
     private void baixar(String url) {
+        NexusDownloader.semEspera.set(true);
+        try { baixarInterno(url); }
+        finally { NexusDownloader.semEspera.remove(); }
+    }
+
+    private void baixarInterno(String url) {
         try {
             preparar();
 

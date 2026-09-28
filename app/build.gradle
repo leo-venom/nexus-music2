@@ -23,8 +23,8 @@ android {
         applicationId "com.leo.nexusmusic2"
         minSdk 24
         targetSdk 34
-        versionCode 191
-        versionName "1.193"
+        versionCode 192
+        versionName "1.194"
     }
 
     signingConfigs {
