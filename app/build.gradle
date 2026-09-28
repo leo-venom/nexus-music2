@@ -1,0 +1,81 @@
+plugins {
+    id 'com.android.application'
+}
+
+// ---------------------------------------------------------------- assinatura
+// Os dados da chave de release ficam em keystore.properties (que está no
+// .gitignore e NUNCA deve ser versionado). Sem esse arquivo o build cai no
+// debug — e o Android marca APK assinado como debug com o aviso
+// "app não confiável" no Play Protect. Com a chave de release, esse aviso some
+// (o de "app de fora da loja" continua, porque é assim para todo app sideload).
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file('keystore.properties')
+def temKeystore = keystoreFile.exists()
+if (temKeystore) {
+    keystoreProps.load(new FileInputStream(keystoreFile))
+}
+
+android {
+    namespace 'com.leo.nexusmusic2'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.leo.nexusmusic2"
+        minSdk 24
+        targetSdk 34
+        versionCode 190
+        versionName "1.192"
+    }
+
+    signingConfigs {
+        release {
+            if (temKeystore) {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+
+                /* Os TRÊS esquemas de assinatura, de propósito:
+                   • v1 (JAR)  — o mais antigo; alguns verificadores de
+                     segurança ainda olham só para ele. Com minSdk 24 o AGP
+                     desliga por padrão, então forçamos ligado.
+                   • v2        — padrão do Android 7+ (o que importa aqui).
+                   • v3        — Android 9+, permite rotação de chave.
+                   Quanto mais esquemas o APK carrega, menos "estranho" ele
+                   parece para scanners automáticos. */
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // assinatura de RELEASE de verdade (era signingConfigs.debug)
+            signingConfig temKeystore ? signingConfigs.release : signingConfigs.debug
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+
+
+    packagingOptions {
+        resources {
+            excludes += ['META-INF/DEPENDENCIES', 'META-INF/LICENSE*', 'META-INF/NOTICE*']
+        }
+    }
+}
+
+dependencies {
+    // Extrai os streams do YouTube (Java puro, sem Python)
+    implementation 'com.github.teamnewpipe:NewPipeExtractor:v0.26.5'
+}
