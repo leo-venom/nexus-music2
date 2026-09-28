@@ -7,6 +7,7 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.util.Log;
 
@@ -143,16 +144,87 @@ public class YtDownload {
     /**
      * Implementação mínima do Downloader do NewPipe usando HttpURLConnection —
      * evita trazer OkHttp só para isso.
+     *
+     * <p><b>Anti-bloqueio do YouTube:</b> imita Chrome Android (UA fixo + cookies de
+     * consentimento), respeita intervalo mínimo entre requests e faz retry com backoff
+     * exponencial em 429/ReCaptcha — o YouTube acusa "comportamento robótico" quando
+     * o fingerprint é de cliente não-navegador.</p>
      */
     static class NexusDownloader extends Downloader {
+
+        /** User-Agent estável de Chrome Android — nunca variar entre chamadas. */
+        private static final String UA =
+                "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 "
+                + "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+
+        /** Cookies que marcam consentimento já resolvido (reduz flag de bot). */
+        private static final String COOKIES =
+                "SOCS=CAI; CONSENT=YES+1; GPS=1; YSC=1";
+
+        /** Intervalo mínimo entre requests consecutivas (ms). */
+        private static final long INTERVALO_MIN_MS = 450L;
+
+        /** Máximo de tentativas por request em 429/ReCaptcha. */
+        private static final int MAX_TENTATIVAS = 3;
+
+        /** Momento do fim da última request concluída (para espaçar). */
+        private static long ultimaReqFimMs = 0L;
+
+        /** Último erro 429 (para backoff global se repetir). */
+        private static long ultimo429Ms = 0L;
+
         @Override
         public Response execute(Request request) throws IOException, ReCaptchaException {
+            IOException ultimaFalha = null;
+            for (int tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+                esperarVez();
+                try {
+                    Response r = executarUmaVez(request);
+                    int code = r.responseCode();
+                    if (code == 429 || code == 503) {
+                        long espera = (1L << (tentativa - 1)) * 1000L;
+                        ultimo429Ms = System.currentTimeMillis();
+                        Log.w(TAG, "HTTP " + code + " (rate limit) — aguardando " + espera + "ms");
+                        if (tentativa == MAX_TENTATIVAS)
+                            throw new IOException("O YouTube limitou o IP — aguarde e tente de novo");
+                        SystemClock.sleep(espera);
+                        continue;
+                    }
+                    ultimaReqFimMs = System.currentTimeMillis();
+                    return r;
+                } catch (IOException io) {
+                    ultimaFalha = io;
+                    String msg = String.valueOf(io.getMessage());
+                    if (msg.contains("reCaptcha") || msg.contains("Recaptcha")) {
+                        long espera = (1L << (tentativa - 1)) * 1500L;
+                        Log.w(TAG, "ReCaptcha — aguardando " + espera + "ms (tentativa " + tentativa + ")");
+                        if (tentativa == MAX_TENTATIVAS) throw io;
+                        SystemClock.sleep(espera);
+                        continue;
+                    }
+                    throw io;
+                }
+            }
+            throw ultimaFalha != null ? ultimaFalha : new IOException("Falha ao acessar o YouTube");
+        }
+
+        /** Executa UMA request (sem retry). Fingerprint completo de Chrome Android. */
+        private Response executarUmaVez(Request request) throws IOException {
             HttpURLConnection conexao = (HttpURLConnection) new URL(request.url()).openConnection();
             conexao.setRequestMethod(request.httpMethod());
             conexao.setConnectTimeout(10000);
-            conexao.setReadTimeout(15000);
+            conexao.setReadTimeout(20000);
             conexao.setInstanceFollowRedirects(true);
 
+            // 1) Fingerprint de navegador — ANTES do loop para ser sempre o primeiro
+            conexao.setRequestProperty("User-Agent", UA);
+            conexao.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.8");
+            conexao.setRequestProperty("Accept",
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    + "image/avif,image/webp,*/*;q=0.8");
+            conexao.setRequestProperty("Cookie", COOKIES);
+
+            // 2) Headers vindos do NewPipe (sobrescrevem os defaults se vierem)
             for (Map.Entry<String, List<String>> cabecalho : request.headers().entrySet()) {
                 for (String valor : cabecalho.getValue()) {
                     conexao.addRequestProperty(cabecalho.getKey(), valor);
@@ -175,6 +247,19 @@ public class YtDownload {
 
             return new Response(codigo, mensagemHttp, conexao.getHeaderFields(), corpo,
                     conexao.getURL().toString());
+        }
+
+        /**
+         * Espaçamento entre requests. Após um 429 recente, triplica a janela de
+         * resfriamento — o YouTube pune re-tentativas imediatas.
+         */
+        private static synchronized void esperarVez() {
+            long agora = System.currentTimeMillis();
+            long intervalo = INTERVALO_MIN_MS;
+            if (ultimo429Ms > 0 && agora - ultimo429Ms < 60_000L) intervalo *= 3;
+            long decorrido = agora - ultimaReqFimMs;
+            if (decorrido < intervalo) SystemClock.sleep(intervalo - decorrido);
+            ultimaReqFimMs = System.currentTimeMillis();
         }
 
         private static String lerTexto(InputStream is) throws IOException {
@@ -617,6 +702,9 @@ public class YtDownload {
         String texto = String.valueOf(e.getMessage());
         if (texto.contains("reCaptcha") || texto.contains("Recaptcha")) {
             return "O YouTube pediu verificação — tente outro link";
+        }
+        if (texto.contains("limitou o IP") || texto.contains("429")) {
+            return "O YouTube limitou o IP — aguarde alguns minutos e tente de novo";
         }
         if (texto.contains("Unable to resolve host") || texto.contains("UnknownHost")) {
             return "Sem conexão com a internet";
